@@ -30,6 +30,11 @@ class VectorQuantizer(nn.Module):
         self.embedding = nn.Embedding(self.codebook_size, self.emb_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.codebook_size, 1.0 / self.codebook_size)
 
+        self.min_encodings_buffer = nn.Parameter(
+            torch.empty(256, self.codebook_size, device='cuda'),
+            requires_grad=False
+        )
+
     def forward(self, z):
         # reshape z -> (batch, height, width, channel) and flatten
         z = z.permute(0, 2, 3, 1).contiguous()
@@ -73,7 +78,10 @@ class VectorQuantizer(nn.Module):
         # input indices: batch*token_num -> (batch*token_num)*1
         # shape: batch, height, width, channel
         indices = indices.view(-1,1)
-        min_encodings = torch.zeros(indices.shape[0], self.codebook_size).to(indices)
+        # min_encodings = torch.zeros(indices.shape[0], self.codebook_size).to(indices)
+        min_encodings = self.min_encodings_buffer[:indices.shape[0]]
+        min_encodings.zero_()
+
         min_encodings.scatter_(1, indices, 1)
         # get quantized latent vectors
         z_q = torch.matmul(min_encodings.float(), self.embedding.weight)

@@ -3,6 +3,8 @@ import cv2
 import argparse
 import glob
 import torch
+from q8_kernels.modules.linear import Q8Linear
+from torch import nn
 from torchvision.transforms.functional import normalize
 from basicsr.utils import imwrite, img2tensor, tensor2img
 from basicsr.utils.download_util import load_file_from_url
@@ -51,6 +53,20 @@ def set_realesrgan():
                         'If you want to disable it, please remove `--bg_upsampler` and `--face_upsample` in command.',
                         category=RuntimeWarning)
     return upsampler
+
+
+def replace_linear_with_q8linear(module, quant_with_hadamard=True):
+    for name, child in module.named_children():
+        # If the child is a Linear layer, replace it
+        if isinstance(child, nn.Linear):
+            # Convert this linear to Q8Linear using your from_linear method
+            q8_layer = Q8Linear.from_linear(child, quant_with_hadamard=quant_with_hadamard)
+
+            # Set the converted layer back into the module
+            setattr(module, name, q8_layer)
+        else:
+            # Recursively apply to child modules
+            replace_linear_with_q8linear(child, quant_with_hadamard)
 
 if __name__ == '__main__':
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -139,9 +155,21 @@ if __name__ == '__main__':
     ckpt_path = load_file_from_url(url=pretrain_model_url['restoration'], 
                                     model_dir='weights/CodeFormer', progress=True, file_name=None)
     checkpoint = torch.load(ckpt_path)['params_ema']
-    net.load_state_dict(checkpoint)
-    net.eval()
+    net.load_state_dict(checkpoint, strict=False)
+    net.eval()#.to(dtype=torch.bfloat16)
+    #
+    # replace_linear_with_q8linear(net)
+    from q8_kernels.graph.graph import make_dynamic_graphed_callable
+    #
+    # net.forward = make_dynamic_graphed_callable(net.forward)
+    for layer in net.ft_layers:
+        layer.to(dtype=torch.float)
 
+    # If there were parameters analogous to scale_shift_table, you would handle them here,
+    # but since CodeFormer doesn't have them, we skip that step.
+
+    torch.cuda.synchronize()
+    net.forward = make_dynamic_graphed_callable(net.forward)
     # ------------------ set up FaceRestoreHelper -------------------
     # large det_model: 'YOLOv5l', 'retinaface_resnet50'
     # small det_model: 'YOLOv5n', 'retinaface_mobile0.25'
@@ -200,15 +228,16 @@ if __name__ == '__main__':
             normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
             cropped_face_t = cropped_face_t.unsqueeze(0).to(device)
 
-            try:
-                with torch.no_grad():
-                    output = net(cropped_face_t, w=w, adain=True)[0]
-                    restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
-                del output
-                torch.cuda.empty_cache()
-            except Exception as error:
-                print(f'\tFailed inference for CodeFormer: {error}')
-                restored_face = tensor2img(cropped_face_t, rgb2bgr=True, min_max=(-1, 1))
+            # try:
+            with torch.no_grad():
+                output = net(cropped_face_t, w=w, adain=True)[0]
+                restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
+                # torch.cuda.synchronize()
+            #del output
+            # torch.cuda.empty_cache()
+            # except Exception as error:
+            #     print(f'\tFailed inference for CodeFormer: {error}')
+            #     restored_face = tensor2img(cropped_face_t, rgb2bgr=True, min_max=(-1, 1))
 
             restored_face = restored_face.astype('uint8')
             face_helper.add_restored_face(restored_face, cropped_face)

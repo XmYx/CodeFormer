@@ -123,6 +123,7 @@ class TransformerSALayer(nn.Module):
         # self attention
         tgt2 = self.norm1(tgt)
         q = k = self.with_pos_embed(tgt2, query_pos)
+
         tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
